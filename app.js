@@ -303,11 +303,14 @@ document.addEventListener('click',e=>{
 
 /* ===== منطق وضعیت‌ها ===== */
 // وضعیت‌های پایانی: با این نتایج، پروندهٔ تماس آن لید کامل می‌شود
-const TERMINAL=['قرارداد بسته شد (در همین تماس)','انصراف و عدم تمایل مشتری','اشتباه بودن شماره','سایت نداشتند','رد شد'];
+const TERMINAL=['قرارداد بسته شد (در همین تماس)','انصراف و عدم تمایل مشتری','اشتباه بودن شماره','سایت نداشتند'];
 const CONTRACT_CALL='قرارداد بسته شد (در همین تماس)';   // بستن قرارداد در همان تماس اول
 const CONTRACT_MEETING='جلسه برگزار شد و قرارداد بسته شد'; // بستن قرارداد در جلسه
 const MEETING_SET='قرار جلسه با کارشناس';
 const NO_SITE='سایت نداشتند';
+/* این شش وضعیت پرونده را نمی‌بندند: تاریخ پیگیری اجباری است و لید در بخش «قرارها و پیگیری‌ها»
+   می‌ماند تا از چرخه خارج نشود. «رد شد» هم عمداً اینجاست؛ «انصراف» پایانی است و بایگانی می‌شود. */
+const FOLLOWUP_STATUSES=[MEETING_SET,'نیازمند پیگیری','منشی پاسخ داد','صحبت با مدیر','پاسخ نداد','رد شد'];
 
 function leadById(id){return db.leads.find(l=>l.id===id)}
 function latestReports(){let m=new Map();db.reports.forEach(r=>m.set(r.leadId,r));return m}
@@ -326,12 +329,20 @@ function leadState(id){
   return{status:r.status,report:r};
 }
 function isDone(id){let s=leadState(id);return s&&(TERMINAL.includes(s.status)||s.status==='قرارداد بسته شد (در جلسه)')}
-// قرارهای جلسهٔ فعال: آخرین گزارش «قرار جلسه» است و هنوز قرارداد بسته نشده
+// قرارها و پیگیری‌های فعال: هر شش وضعیت FOLLOWUP_STATUSES تا پرونده از چرخه خارج نشود.
+// kind = meeting برای قرار جلسه، followup برای پیگیری تلفنی.
 function appointments(){
-  return db.leads.filter(l=>{
-    let s=leadState(l.id);
-    return s&&(s.status===MEETING_SET||s.status.startsWith('جلسه گزارش‌شده'));
-  }).map(l=>({lead:l,state:leadState(l.id),followUp:leadState(l.id).report.followUp}))
+  return db.leads.map(l=>({lead:l,state:leadState(l.id)}))
+    .filter(a=>{
+      let s=a.state;if(!s)return false;
+      if(s.status.startsWith('جلسه گزارش‌شده'))return true;
+      return FOLLOWUP_STATUSES.includes(s.status);
+    })
+    .map(a=>{
+      let s=a.state;
+      let isMeeting=s.status===MEETING_SET||s.status.startsWith('جلسه گزارش‌شده');
+      return {lead:a.lead,state:s,followUp:s.report.followUp,kind:isMeeting?'meeting':'followup'};
+    })
     .filter(a=>a.followUp&&!Number.isNaN(new Date(a.followUp).getTime()))
     .sort((x,y)=>new Date(x.followUp)-new Date(y.followUp));
 }
@@ -372,8 +383,8 @@ function refresh(){
   $('#calBadge').textContent=due?fa(due)+' سررسیدشده':'';
   let al=$('#alertBox');
   let msgs=[];
-  if(soon.length)msgs.push(`${fa(soon.length)} قرار جلسه تا ۲۴ ساعت آینده`);
-  if(over.length)msgs.push(`${fa(over.length)} قرار جلسه گذشته`);
+  if(soon.length)msgs.push(`${fa(soon.length)} قرار/پیگیری تا ۲۴ ساعت آینده`);
+  if(over.length)msgs.push(`${fa(over.length)} قرار/پیگیری گذشته`);
   if(due)msgs.push(`${fa(due)} تماس پیگیری سررسیدشده`);
   if(msgs.length){al.className=over.length||due?'alert urgent':'alert';al.textContent='هشدار: '+msgs.join('؛ ')}
   else{al.className='alert hidden'}
@@ -434,6 +445,11 @@ $('#clearLeads').onclick=()=>{
 };
 
 /* ===== صفحه تماس ===== */
+// لیدی که فرم گزارش برایش باز است؛ ثبت گزارش همیشه روی همین لید انجام می‌شود
+// (نه روی next()) تا با ورود پیگیری‌ها به چرخه، گزارش روی لید اشتباه ثبت نشود.
+let currentLeadId=null;
+// بازکردن مستقیم یک لید مشخص از بخش قرارها/پیگیری‌ها
+let openLeadId=null;
 // لید بعدی برای تماس: ابتدا پیش‌نویس نیمه‌تمام، بعد پیگیری‌های سررسیدشده، بعد لیدهای تازه
 function next(){
   if(db.draft){let i=db.leads.findIndex(l=>l.id===db.draft.leadId);if(i>=0)return i}
@@ -446,9 +462,10 @@ function next(){
   return -1
 }
 function renderWork(){
-  let i=next(),card=$('#leadCard'),form=$('#reportForm');
-  if(i<0){card.innerHTML='<div class="notice">تماس آماده‌ای ندارید؛ تقویم پیگیری‌ها را بررسی کنید یا لید جدید وارد کنید.</div>';form.classList.add('hidden');return}
-  db.cursor=i;let x=db.leads[i];form.reset();
+  let i=openLeadId?db.leads.findIndex(l=>l.id===openLeadId):next(),card=$('#leadCard'),form=$('#reportForm');
+  openLeadId=null;
+  if(i<0){card.innerHTML='<div class="notice">تماس آماده‌ای ندارید؛ تقویم پیگیری‌ها را بررسی کنید یا لید جدید وارد کنید.</div>';form.classList.add('hidden');currentLeadId=null;return}
+  db.cursor=i;let x=db.leads[i];currentLeadId=x.id;form.reset();
   $('#resumeHint').classList.add('hidden');
   if(!db.draft){db.draft={leadId:x.id};localStorage.setItem(KEY,JSON.stringify(db))}
   card.innerHTML=`<div class="lead"><strong>لید ${fa(i+1)} از ${fa(db.leads.length)}</strong>
@@ -470,15 +487,18 @@ function renderWork(){
   }
   updateFollowUpLabel();syncFollowUpText();
 }
-function needsDate(){let s=$('#status').value;return s===CONTRACT_CALL||s===MEETING_SET}
+function needsDate(){let s=$('#status').value;return s===CONTRACT_CALL||FOLLOWUP_STATUSES.includes(s)}
 function updateFollowUpLabel(){
   let s=$('#status').value;
   $('#followUpText').required=needsDate();
-  $('#followUpLabel').textContent=s===MEETING_SET?'تاریخ و ساعت جلسه (اجباری)':s===CONTRACT_CALL?'تاریخ قرارداد (اجباری)':'زمان پیگیری/جلسه (در صورت وجود)';
+  $('#followUpLabel').textContent=s===MEETING_SET?'تاریخ و ساعت جلسه (اجباری)'
+    :s===CONTRACT_CALL?'تاریخ قرارداد (اجباری)'
+    :FOLLOWUP_STATUSES.includes(s)?'تاریخ و ساعت پیگیری (اجباری)'
+    :'زمان پیگیری/جلسه (در صورت وجود)';
 }
 function persistDraft(){
-  let i=next();if(i<0)return;
-  db.draft={leadId:db.leads[i].id,status:$('#status').value,notes:$('#notes').value,followUp:$('#followUp').value,contactName:$('#contactName').value};
+  let lead=leadById(currentLeadId);if(!lead)return;
+  db.draft={leadId:lead.id,status:$('#status').value,notes:$('#notes').value,followUp:$('#followUp').value,contactName:$('#contactName').value};
   localStorage.setItem(KEY,JSON.stringify(db));
 }
 $('#status').addEventListener('change',updateFollowUpLabel);
@@ -486,16 +506,17 @@ $('#reportForm').addEventListener('input',persistDraft);
 $('#reportForm').addEventListener('change',persistDraft);
 $('#reportForm').addEventListener('submit',e=>{
   e.preventDefault();
-  let i=next();if(i<0)return;
+  let i=db.leads.findIndex(l=>l.id===currentLeadId);if(i<0)return;
   let lead=db.leads[i],status=$('#status').value,notes=$('#notes').value.trim(),
       followUp=$('#followUp').value,contactName=$('#contactName').value.trim(),
       stamp=new Date(followUp).getTime();
   if(!status||notes.length<3||!contactName){alert('نتیجه تماس، توضیحات (حداقل ۳ حرف) و نام پاسخ‌دهنده اجباری است.');return}
   if(needsDate()&&(!followUp||!Number.isFinite(stamp))){$('#followUpText').classList.add('invalid');alert('تاریخ و ساعت را صریحاً وارد کنید.');return}
-  // پیگیری اختیاری برای وضعیت‌های غیرپایانی: اگر تاریخ داده شده باید معتبر و در آینده باشد
-  let isFinal=TERMINAL.includes(status);
-  let scheduled=!isFinal&&followUp&&Number.isFinite(stamp);
-  if(scheduled&&stamp<=Date.now()){alert('زمان تماس مجدد باید در آینده باشد.');return}
+  // شش وضعیت پیگیری همیشه زمان‌بندی می‌شوند تا در بخش قرارها بمانند؛
+  // وضعیت‌های دیگر اگر تاریخ داشته باشند، پیگیری زمان‌بندی‌شده حساب می‌شوند.
+  let isFollow=FOLLOWUP_STATUSES.includes(status);
+  let scheduled=isFollow||(!TERMINAL.includes(status)&&!!followUp&&Number.isFinite(stamp));
+  if(scheduled&&stamp<=Date.now()){alert('زمان پیگیری باید در آینده باشد.');return}
   db.reports.push({id:crypto.randomUUID(),leadId:lead.id,lead,status,notes,followUp,contactName,scheduledFollowUp:!!scheduled,createdAt:new Date().toISOString()});
   db.draft=null;db.cursor=i+1;save();
   e.target.reset();updateFollowUpLabel();
@@ -516,31 +537,48 @@ function renderAppointments(){
   $('#overdueCount').textContent=fa(list.filter(a=>apptType(a)==='overdue').length);
   let show=apptFilter==='soon'?list.filter(a=>apptType(a)==='soon')
     :apptFilter==='overdue'?list.filter(a=>apptType(a)==='overdue')
-    :apptFilter==='met'?list.filter(a=>a.state.meeting)
-    :apptFilter==='unmet'?list.filter(a=>!a.state.meeting)
+    :apptFilter==='followup'?list.filter(a=>a.kind!=='meeting')
+    :apptFilter==='met'?list.filter(a=>a.kind==='meeting'&&a.state.meeting)
+    :apptFilter==='unmet'?list.filter(a=>a.kind==='meeting'&&!a.state.meeting)
     :list;
   $('#appointmentList').innerHTML=show.length?
     show.map(a=>{
-      let t=apptType(a),l=a.lead,m=a.state.meeting;
-      return `<article class="appointment ${t}" data-lid="${esc(l.id)}">
-        <h3>${esc(l.ownerName||l.owner||'نام صاحب سایت ثبت نشده')}</h3>
-        <span class="badge">${t==='soon'?'تا ۲۴ ساعت آینده':t==='overdue'?'گذشته':'آینده'}</span>
-        ${siteIntel(l)}
-        <div class="line time-line" data-followup="${esc(a.followUp)}"><b>زمان قرار:</b> ${fmt(a.followUp)} — ${ago(a.followUp)}</div>
-        <div class="line"><b>سایت:</b> ${siteLink(l)}</div>
-        <div class="line"><b>تلفن:</b> ${esc(l.phone||l.mobile||l.tel||'ثبت نشده')}</div>
-        <div class="line"><b>توضیحات تماس:</b> ${esc(a.state.report.notes||'')}</div>
-        <div class="line"><b>نام پاسخ‌دهنده:</b> ${esc(a.state.report.contactName||'ثبت نشده')}</div>
-        ${m?`<div class="report-box"><b>گزارش جلسه:</b><br>${esc(m.status)}<br>${esc(m.notes||'')}<br><small>${fmt(m.at)}</small></div>`:''}
-        <button type="button" class="reportBtn" data-meeting="${esc(l.id)}">${m?'ویرایش گزارش جلسه':'ثبت گزارش جلسه'}</button>
-      </article>`;
+      let t=apptType(a),l=a.lead,m=a.state.meeting,isMeeting=a.kind==='meeting';
+      let badge=t==='soon'?'تا ۲۴ ساعت آینده':t==='overdue'?'گذشته':'آینده';
+      let kindLabel=isMeeting?'قرار جلسه':a.state.status;
+      return `<details class="appointment ${t}" data-lid="${esc(l.id)}">
+        <summary>
+          <span class="ap-name">${esc(l.ownerName||l.owner||'نام صاحب سایت ثبت نشده')}</span>
+          <span class="ap-meta"><span class="badge">${badge}</span><span class="ap-kind">${esc(kindLabel)}</span></span>
+          <span class="ap-time">${fmt(a.followUp)} — ${ago(a.followUp)}</span>
+        </summary>
+        <div class="appt-body">
+          <div class="line time-line" data-followup="${esc(a.followUp)}"><b>زمان:</b> ${fmt(a.followUp)} — ${ago(a.followUp)}</div>
+          <div class="line"><b>سایت:</b> ${siteLink(l)}</div>
+          <div class="line"><b>تلفن:</b> ${esc(l.phone||l.mobile||l.tel||'ثبت نشده')}</div>
+          <div class="line"><b>توضیحات تماس:</b> ${esc(a.state.report.notes||'')}</div>
+          <div class="line"><b>نام پاسخ‌دهنده:</b> ${esc(a.state.report.contactName||'ثبت نشده')}</div>
+          ${talkBlock(l)}
+          <details class="tech"><summary>جزئیات فنی — برای خودتان، به مشتری نگویید</summary>${siteIntel(l)}</details>
+          ${m?`<div class="report-box"><b>گزارش جلسه:</b><br>${esc(m.status)}<br>${esc(m.notes||'')}<br><small>${fmt(m.at)}</small></div>`:''}
+          ${isMeeting
+            ?`<button type="button" class="reportBtn" data-meeting="${esc(l.id)}">${m?'ویرایش گزارش جلسه':'ثبت گزارش جلسه'}</button>`
+            :`<button type="button" class="reportBtn" data-followup-lead="${esc(l.id)}">ثبت نتیجه پیگیری</button>`}
+        </div>
+      </details>`;
     }).join('')
     :'<div class="result">برای این فیلتر قراری وجود ندارد.</div>';
 }
+// بازکردن فرم گزارش برای لیدی که از بخش قرارها/پیگیری‌ها انتخاب شده است
+document.addEventListener('click',e=>{
+  let b=e.target.closest('[data-followup-lead]');if(!b)return;
+  openLeadId=b.dataset.followupLead;
+  go('work');
+});
 // به‌روزرسانی درجای «مانده/گذشته» بدون بازنویسی کل لیست (اسکرول و فیلتر حفظ می‌شود)
 function refreshApptTimes(){
   document.querySelectorAll('#appointmentList .time-line[data-followup]').forEach(el=>{
-    el.innerHTML=`<b>زمان قرار:</b> ${fmt(el.dataset.followup)} — ${ago(el.dataset.followup)}`;
+    el.innerHTML=`<b>زمان:</b> ${fmt(el.dataset.followup)} — ${ago(el.dataset.followup)}`;
   });
 }
 
@@ -552,10 +590,12 @@ document.addEventListener('click',e=>{
   meetingLeadId=b.dataset.meeting;
   let l=leadById(meetingLeadId);if(!l)return;
   let s=leadState(meetingLeadId);
-  $('#meetingCard').innerHTML=`<h3>${esc(l.ownerName||l.owner||'نام صاحب سایت ثبت نشده')}</h3>${siteIntel(l)}
+  $('#meetingCard').innerHTML=`<h3>${esc(l.ownerName||l.owner||'نام صاحب سایت ثبت نشده')}</h3>
     <div class="line"><b>زمان قرار:</b> ${fmt(s?.report?.followUp)}</div>
     <div class="line"><b>سایت:</b> ${siteLink(l)}</div>
-    <div class="line"><b>تلفن:</b> ${esc(l.phone||l.mobile||l.tel||'ثبت نشده')}</div>`;
+    <div class="line"><b>تلفن:</b> ${esc(l.phone||l.mobile||l.tel||'ثبت نشده')}</div>
+    ${talkBlock(l)}
+    <details class="tech"><summary>جزئیات فنی — برای خودتان، به مشتری نگویید</summary>${siteIntel(l)}</details>`;
   let old=meetingFor(meetingLeadId);
   $('#meetingStatus').value=old?old.status:'';
   $('#meetingNotes').value=old?old.notes:'';

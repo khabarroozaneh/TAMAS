@@ -92,3 +92,18 @@ details.tech[open] summary{color:var(--brand)}
 .cal-day.sel{background:var(--brand);color:#fff;border-color:var(--brand)}
 .cal-day.sel i{background:rgba(255,255,255,.25);color:#fff}
 @media(max-width:520px){main{padding:12px}.stats{grid-template-columns:repeat(2,1fr);gap:6px}.stats>div{padding:8px}.stats b{font-size:20px}}
+
+/* کارت قرار/پیگیری به‌صورت بازشو-بسته‌شو تا با زیادشدن تعداد، صفحه شلوغ نشود */
+.appointment.appointment{padding:0;overflow:hidden}
+.appointment>summary{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;padding:14px 16px;cursor:pointer;list-style:none}
+.appointment>summary::-webkit-details-marker{display:none}
+.appointment>summary::after{content:"▾";color:#7a8a63;font-size:13px;line-height:1;transition:transform .2s;flex:0 0 auto}
+.appointment[open]>summary::after{transform:rotate(180deg)}
+.appointment[open]>summary{border-bottom:1px dashed var(--line)}
+.appointment h3{margin:0}
+.ap-name{font-weight:700;color:var(--brand);font-size:17px;flex:1 1 auto}
+.ap-meta{display:flex;gap:6px;align-items:center;flex:0 0 auto}
+.ap-kind{font-size:12px;background:#eef7ee;border:1px solid #bfe3c1;color:#2e7d32;border-radius:999px;padding:2px 8px;white-space:nowrap}
+.ap-time{flex:1 0 100%;font-size:13px;color:#55603f}
+.appt-body{padding:6px 16px 16px}
+.appt-body .talk{margin:12px 0}
